@@ -1,0 +1,5 @@
+# Rendu graphique — une seule dépendance :
+#   pygame-ce (fork de pygame, import pygame identique)
+# NB : pygame « classique » n'a pas de wheel pour Python 3.14,
+#     pygame-ce est un remplacement direct compatible.
+pygame-ce>=2.0
