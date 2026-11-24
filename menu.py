@@ -1,58 +1,47 @@
 # -*- coding: utf-8 -*-
 """
-menu.py — Menu de démarrage graphique du « Jeu du Gendarme et du Voleur ».
+menu.py — Écran de connexion du jeu (multijoueur en ligne uniquement).
 
-Écran de sélection avant la partie ; permet de choisir :
+Deux actions seulement :
 
-  * la LANGUE de l'interface : Français / Malagasy (bouton en haut à
-    droite, bascule instantanée de tout le menu) ;
-  * le MODE de jeu :
-        - Solo (hors ligne) : contre l'IA au niveau choisi (mora /
-          antonony / sarotra) ;
-        - 2 joueurs (même écran) : la partie locale d'origine ;
-        - Multijoueur (en ligne) : connexion à server.py ;
-  * en Solo : le RÔLE du joueur humain (Voleur / Police), l'IA prend
-    le contrôle du rôle opposé ;
-  * en ligne : adresse et port du serveur, nom, rôle souhaité.
+  * « Héberger une partie » : le joueur 1 lance le serveur depuis le jeu ;
+    son adresse IP s'affiche ensuite pour être partagée avec l'adversaire ;
+  * « Rejoindre une partie » : les serveurs présents sur le réseau local
+    sont détectés automatiquement et affichés sous forme de boutons. En
+    secours, un champ permet de saisir l'adresse IP de l'hôte.
 
-Le menu est RESPONSIVE (fenêtre redimensionnable) : les boutons sont
-recentrés à chaque frame en fonction de la taille actuelle.
+Aucun choix de rôle, de difficulté, de langue ou de port : les rôles sont
+attribués automatiquement et le port par défaut est utilisé partout.
 
-Valeur de retour de Menu.run() (dict de configuration, ou None si
-l'utilisateur quitte) :
-
-    {"mode": "solo",  "role": "voleur", "niveau": "sarotra", "langue": "mg"}
-    {"mode": "local", "langue": "fr"}
-    {"mode": "ligne", "host": "192.168.1.20", "port": 5555,
-     "nom": "Alice", "role": "voleur", "langue": "fr"}
+Menu.run(screen) renvoie :
+    {"action": "host", "nom": "Alice" | None}
+    {"action": "join", "host": "192.168.1.20", "port": 5555, "nom": "Bob"}
+    None si l'utilisateur quitte.
 """
+
+import threading
 
 import pygame
 
-from game import POLICE, VOLEUR
-from locales import LANGUES, texte
+from discovery import chercher_serveurs
+from locales import texte
 from render import (COL_BG, COL_BOARD, COL_COP, COL_SEL, COL_STATUS_BG,
                     COL_TARGET, COL_TEXT, COL_TEXT_DIM, COL_THIEF, load_font)
 
-
-# Sentinelle interne : l'utilisateur veut fermer le menu (Quitter / Échap
-# sur l'écran principal). Distincte de None qui signifie « continuer ».
 _QUITTER = "menu:quitter"
+PORT_PAR_DEFAUT = 5555
+NB_SERVEURS_AFFICHES = 3
 
 
-# ---------------------------------------------------------------------------
-# Widgets
-# ---------------------------------------------------------------------------
 class Bouton:
-    """Bouton rectangulaire, avec états « survolé » et « sélectionné »."""
+    """Bouton rectangulaire avec état « survolé »."""
 
     def __init__(self, identifiant, libelle, rect, couleur=COL_TEXT,
-                 selectionne=False, taille_police=18):
+                 taille_police=18):
         self.id = identifiant
         self.libelle = libelle
         self.rect = rect
         self.couleur = couleur
-        self.selectionne = selectionne
         self.taille_police = taille_police
 
     def contient(self, pos):
@@ -60,43 +49,39 @@ class Bouton:
 
     def dessiner(self, screen, souris):
         survole = self.rect.collidepoint(souris)
-        fond = COL_STATUS_BG
-        if self.selectionne:
-            fond = (46, 50, 66)          # teinte de sélection
-        pygame.draw.rect(screen, fond, self.rect, border_radius=10)
-        bordure = COL_SEL if survole else (COL_BOARD if not self.selectionne
-                                           else COL_TARGET)
-        pygame.draw.rect(screen, bordure, self.rect, 2, border_radius=10)
-        police = load_font(self.taille_police, bold=True)
-        img = police.render(self.libelle, True, self.couleur)
+        pygame.draw.rect(screen, (46, 50, 66) if survole else COL_STATUS_BG,
+                         self.rect, border_radius=10)
+        pygame.draw.rect(screen, COL_SEL if survole else COL_BOARD,
+                         self.rect, 2, border_radius=10)
+        img = load_font(self.taille_police, bold=True).render(
+            self.libelle, True, self.couleur)
         screen.blit(img, img.get_rect(center=self.rect.center))
 
 
 class ChampTexte:
-    """Champ de saisie d'une ligne (clavier) : adresse, port, nom."""
+    """Champ de saisie d'une ligne (nom, adresse IP)."""
 
-    def __init__(self, identifiant, libelle, valeur="", actif=False):
+    def __init__(self, identifiant, libelle, valeur=""):
         self.id = identifiant
         self.libelle = libelle
         self.valeur = valeur
-        self.actif = actif
-        self.rect = None                # rempli au dessin (responsive)
+        self.actif = False
+        self.rect = None
 
     def dessiner(self, screen, rect, souris):
         self.rect = rect
         survole = rect.collidepoint(souris)
-        libelle_img = load_font(14).render(self.libelle, True, COL_TEXT_DIM)
-        screen.blit(libelle_img, (rect.x, rect.y - 22))
+        screen.blit(load_font(14).render(self.libelle, True, COL_TEXT_DIM),
+                    (rect.x, rect.y - 22))
         pygame.draw.rect(screen, COL_STATUS_BG, rect, border_radius=8)
         pygame.draw.rect(screen, COL_SEL if (self.actif or survole) else COL_BOARD,
                          rect, 2, border_radius=8)
         valeur = self.valeur + ("_" if self.actif else "")
-        img = load_font(17).render(valeur, True, COL_TEXT if self.actif
-                                   else COL_TEXT_DIM)
+        img = load_font(17).render(valeur, True,
+                                   COL_TEXT if self.actif else COL_TEXT_DIM)
         screen.blit(img, (rect.x + 12, rect.centery - img.get_height() // 2))
 
     def taper(self, event):
-        """Traite un événement KEYDOWN destiné au champ actif."""
         if event.key == pygame.K_BACKSPACE:
             self.valeur = self.valeur[:-1]
         elif event.unicode and event.unicode.isprintable():
@@ -104,45 +89,36 @@ class ChampTexte:
                 self.valeur += event.unicode
 
 
-# ---------------------------------------------------------------------------
-# Le menu
-# ---------------------------------------------------------------------------
 class Menu:
-    """Écran de sélection. Utilisation : Menu(langue).run(screen)."""
+    """Écran de connexion. Utilisation : Menu().run(screen)."""
 
-    def __init__(self, langue="fr"):
-        self.langue = langue if langue in LANGUES else "fr"
-        self.ecran = "mode"             # "mode" -> "solo" / "ligne"
-        self.role = VOLEUR              # rôle choisi (solo ET en ligne)
-        self.niveau = "antonony"        # difficulté de l'IA (solo)
-        self.role_ligne = "any"         # rôle souhaité en ligne
-        self.erreur = ""                # message d'erreur inline (en ligne)
-        self.champ_actif = None         # id du champ texte actif
+    def __init__(self):
+        self.ecran = "accueil"          # "accueil" | "rejoindre"
+        self.erreur = ""
+        self.serveurs = []
+        self.recherche_en_cours = False
+        self._verrou = threading.Lock()
         self.champs = {
-            "host": ChampTexte("host", "", "127.0.0.1"),
-            "port": ChampTexte("port", "", "5555"),
-            "nom": ChampTexte("nom", "", ""),
+            "nom": ChampTexte("nom", texte("champ_nom")),
+            "host": ChampTexte("host", texte("champ_hote")),
         }
+        self.champ_actif = None
 
     # ------------------------------------------------------------------ #
-    # Boucle principale du menu
+    # Boucle principale
     # ------------------------------------------------------------------ #
     def run(self, screen):
-        pygame.display.set_caption(texte("titre_menu", self.langue))
+        pygame.display.set_caption(texte("titre_menu"))
         clock = pygame.time.Clock()
         while True:
             resultat = None
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     return None
-                if event.type == pygame.VIDEORESIZE:
-                    # la fenêtre est déjà redimensionnée par pygame ;
-                    # le menu se recentre tout seul à la frame suivante
-                    continue
                 if event.type == pygame.KEYDOWN:
-                    resultat = resultat or self._touche(event)
+                    resultat = self._touche(event)
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    resultat = resultat or self._clic(pygame.mouse.get_pos())
+                    resultat = self._clic(pygame.mouse.get_pos())
                 if resultat is not None:
                     break
             if resultat is _QUITTER:
@@ -155,188 +131,162 @@ class Menu:
             clock.tick(30)
 
     # ------------------------------------------------------------------ #
-    # Gestion clavier
+    # Détection automatique (thread)
+    # ------------------------------------------------------------------ #
+    def _lancer_recherche(self):
+        with self._verrou:
+            if self.recherche_en_cours:
+                return
+            self.recherche_en_cours = True
+            self.serveurs = []
+
+        def tache():
+            trouvees = chercher_serveurs()
+            with self._verrou:
+                self.serveurs = trouvees
+                self.recherche_en_cours = False
+
+        threading.Thread(target=tache, daemon=True).start()
+
+    # ------------------------------------------------------------------ #
+    # Clavier / souris
     # ------------------------------------------------------------------ #
     def _touche(self, event):
-        """Traite une touche. Renvoie None (continuer), _QUITTER ou une
-        configuration finale."""
-        if self.ecran == "ligne" and self.champ_actif:
+        if self.champ_actif:
             champ = self.champs[self.champ_actif]
             if event.key in (pygame.K_RETURN, pygame.K_TAB):
-                self._champ_suivant()
+                if self.ecran == "rejoindre" and self.champ_actif == "host":
+                    return self._connecter_manuel()
+                self.champ_actif = None
             elif event.key == pygame.K_ESCAPE:
                 self.champ_actif = None
             else:
                 champ.taper(event)
             return None
         if event.key == pygame.K_ESCAPE:
-            if self.ecran == "mode":
-                return _QUITTER          # quitter le jeu
-            self.ecran = "mode"          # retour à l'écran des modes
+            if self.ecran == "accueil":
+                return _QUITTER
+            self.ecran = "accueil"
             self.erreur = ""
-        return None
-
-    def _champ_suivant(self):
-        ordre = ["host", "port", "nom"]
-        if self.champ_actif in ordre:
-            i = ordre.index(self.champ_actif)
-            self.champ_actif = ordre[(i + 1) % len(ordre)]
-
-    # ------------------------------------------------------------------ #
-    # Gestion souris
-    # ------------------------------------------------------------------ #
-    def _clic(self, pos):
-        """Traite un clic. Renvoie None (continuer), _QUITTER ou une
-        configuration finale."""
-        boutons = self._construire()
-        for bouton in boutons:
-            if bouton.contient(pos):
-                return self._activer(bouton.id)
-        # clic dans un champ texte ?
-        if self.ecran == "ligne":
-            for champ in self.champs.values():
-                if champ.rect and champ.rect.collidepoint(pos):
-                    self.champ_actif = champ.id
-                    return None
             self.champ_actif = None
         return None
 
-    def _activer(self, id_bouton):
-        """Exécute l'action d'un bouton. Renvoie None (continuer),
-        _QUITTER ou une configuration finale."""
-        if id_bouton == "langue":            # bascule FR <-> MG
-            self.langue = "mg" if self.langue == "fr" else "fr"
+    def _clic(self, pos):
+        for bouton in self._construire():
+            if bouton.contient(pos):
+                return self._activer(bouton.id)
+        if self.ecran == "rejoindre":
+            for ident in ("host",):
+                champ = self.champs[ident]
+                if champ.rect and champ.rect.collidepoint(pos):
+                    self.champ_actif = ident
+                    return None
+        elif self.ecran == "accueil":
+            champ = self.champs["nom"]
+            if champ.rect and champ.rect.collidepoint(pos):
+                self.champ_actif = "nom"
+                return None
+        self.champ_actif = None
+        return None
+
+    def _config(self, host=None, port=PORT_PAR_DEFAUT):
+        nom = self.champs["nom"].valeur.strip() or None
+        if host is None:
+            return {"action": "host", "nom": nom}
+        return {"action": "join", "host": host, "port": port, "nom": nom}
+
+    def _connecter_manuel(self):
+        """Accepte une IP seule ou `IP:port` (port 5555 par défaut)."""
+        host = self.champs["host"].valeur.strip()
+        port = PORT_PAR_DEFAUT
+        if ":" in host:
+            host, _, texte_port = host.rpartition(":")
+            try:
+                port = int(texte_port)
+                if not 1 <= port <= 65535:
+                    raise ValueError
+            except ValueError:
+                self.erreur = texte("port_invalide")
+                return None
+        if not host:
+            self.erreur = texte("champ_ip_vide")
             return None
+        return self._config(host=host, port=port)
+
+    def _activer(self, id_bouton):
         if id_bouton == "quitter":
             return _QUITTER
-        if id_bouton == "retour":
-            self.ecran = "mode"
+        if id_bouton == "heberger":
+            return self._config()
+        if id_bouton == "rejoindre":
+            self.ecran = "rejoindre"
             self.erreur = ""
+            self.champ_actif = None
+            self._lancer_recherche()
             return None
-
-        if self.ecran == "mode":
-            if id_bouton == "mode_solo":
-                self.ecran = "solo"
-            elif id_bouton == "mode_local":
-                return {"mode": "local", "langue": self.langue}
-            elif id_bouton == "mode_ligne":
-                self.ecran = "ligne"
-                self.erreur = ""
-                self.champ_actif = "host"
+        if id_bouton == "retour":
+            self.ecran = "accueil"
+            self.erreur = ""
+            self.champ_actif = None
             return None
-
-        if self.ecran == "solo":
-            if id_bouton == "role_voleur":
-                self.role = VOLEUR
-            elif id_bouton == "role_police":
-                self.role = POLICE
-            elif id_bouton.startswith("niveau_"):
-                self.niveau = id_bouton[len("niveau_"):]
-            elif id_bouton == "commencer":
-                return {"mode": "solo", "role": self.role, "niveau": self.niveau,
-                        "langue": self.langue}
+        if id_bouton == "rafraichir":
+            self.erreur = ""
+            self._lancer_recherche()
             return None
-
-        if self.ecran == "ligne":
-            if id_bouton == "ligne_role_voleur":
-                self.role_ligne = VOLEUR
-            elif id_bouton == "ligne_role_police":
-                self.role_ligne = POLICE
-            elif id_bouton == "ligne_role_any":
-                self.role_ligne = "any"
-            elif id_bouton == "commencer":
-                host = self.champs["host"].valeur.strip() or "127.0.0.1"
-                try:
-                    port = int(self.champs["port"].valeur.strip())
-                    if not 1 <= port <= 65535:
-                        raise ValueError("port hors bornes")
-                except ValueError:
-                    self.erreur = texte("port_invalide", self.langue)
-                    return None
-                nom = self.champs["nom"].valeur.strip() or None
-                return {"mode": "ligne", "host": host, "port": port, "nom": nom,
-                        "role": self.role_ligne, "langue": self.langue}
-            return None
+        if id_bouton == "connecter":
+            return self._connecter_manuel()
+        if id_bouton.startswith("serveur_"):
+            i = int(id_bouton.split("_")[1])
+            with self._verrou:
+                if 0 <= i < len(self.serveurs):
+                    srv = self.serveurs[i]
+                    return self._config(host=srv["host"], port=srv["port"])
         return None
 
     # ------------------------------------------------------------------ #
-    # Construction des widgets (RESPONSIVE : recalculée à chaque frame
-    # à partir de la taille actuelle de la fenêtre)
+    # Widgets (recalculés à chaque frame : fenêtre redimensionnable)
     # ------------------------------------------------------------------ #
-    def _rang_centree(self, w, y, n, libelles_ids, hauteur=46, ecart=14):
-        """n boutons côte à côte, centrés horizontalement."""
-        largeur = min(240, max(120, (w - 60 - (n - 1) * ecart) // n))
+    def _rang_centree(self, w, y, libelles_ids, largeur=280, hauteur=48,
+                      ecart=14):
+        n = len(libelles_ids)
+        largeur = min(largeur, max(140, (w - 60 - (n - 1) * ecart) // max(n, 1)))
         total = n * largeur + (n - 1) * ecart
         x0 = (w - total) // 2
-        boutons = []
-        for i, (ident, libelle, couleur, selectionne) in enumerate(libelles_ids):
-            rect = pygame.Rect(x0 + i * (largeur + ecart), y, largeur, hauteur)
-            boutons.append(Bouton(ident, libelle, rect, couleur=couleur,
-                                  selectionne=selectionne))
-        return boutons
+        return [Bouton(ident, libelle,
+                       pygame.Rect(x0 + i * (largeur + ecart), y,
+                                   largeur, hauteur), couleur=couleur)
+                for i, (ident, libelle, couleur) in enumerate(libelles_ids)]
 
     def _construire(self):
-        """Tous les widgets de l'écran courant."""
         w, h = pygame.display.get_surface().get_size()
         boutons = []
-        # bouton de langue, en haut à droite (tous les écrans)
-        langue_libelle = texte("btn_langue", self.langue)
-        rect_langue = pygame.Rect(w - 230, 14, 216, 40)
-        boutons.append(Bouton("langue", langue_libelle, rect_langue,
-                              couleur=COL_TEXT_DIM))
-
-        if self.ecran == "mode":
-            boutons.extend(self._rang_centree(w, h // 3, 1, [
-                ("mode_solo", texte("mode_solo", self.langue), COL_TEXT, False)]))
-            boutons.extend(self._rang_centree(w, h // 3 + 66, 1, [
-                ("mode_local", texte("mode_local", self.langue), COL_TEXT, False)]))
-            boutons.extend(self._rang_centree(w, h // 3 + 132, 1, [
-                ("mode_ligne", texte("mode_ligne", self.langue), COL_TEXT, False)]))
-            boutons.extend(self._rang_centree(w, h - 90, 1, [
-                ("quitter", texte("btn_quitter", self.langue),
-                 COL_THIEF, False)]))
-
-        elif self.ecran == "solo":
-            y = h // 4
-            boutons.extend(self._rang_centree(w, y, 2, [
-                ("role_voleur", texte("role_voleur", self.langue),
-                 COL_THIEF, self.role == VOLEUR),
-                ("role_police", texte("role_police", self.langue),
-                 COL_COP, self.role == POLICE)]))
-            y2 = h // 4 + 96
-            boutons.extend(self._rang_centree(w, y2, 3, [
-                ("niveau_mora", texte("niveau_mora", self.langue),
-                 COL_TEXT, self.niveau == "mora"),
-                ("niveau_antonony", texte("niveau_antonony", self.langue),
-                 COL_TEXT, self.niveau == "antonony"),
-                ("niveau_sarotra", texte("niveau_sarotra", self.langue),
-                 COL_TEXT, self.niveau == "sarotra")]))
-            boutons.extend(self._rang_centree(w, h - 150, 2, [
-                ("retour", texte("btn_retour", self.langue), COL_TEXT_DIM, False),
-                ("commencer", texte("btn_commencer", self.langue),
-                 COL_TARGET, False)]))
-
-        elif self.ecran == "ligne":
-            y = h // 4
-            for ident, cle in (("host", "champ_hote"), ("port", "champ_port"),
-                              ("nom", "champ_nom")):
-                champ = self.champs[ident]
-                champ.libelle = texte(cle, self.langue)
-                rect = pygame.Rect(w // 2 - 190, y, 380, 42)
-                champ.rect = rect
-                y += 78
-            y_role = y
-            boutons.extend(self._rang_centree(w, y_role, 3, [
-                ("ligne_role_voleur", texte("role_voleur", self.langue),
-                 COL_THIEF, self.role_ligne == VOLEUR),
-                ("ligne_role_police", texte("role_police", self.langue),
-                 COL_COP, self.role_ligne == POLICE),
-                ("ligne_role_any", texte("role_any", self.langue),
-                 COL_TEXT, self.role_ligne == "any")]))
-            boutons.extend(self._rang_centree(w, h - 150, 2, [
-                ("retour", texte("btn_retour", self.langue), COL_TEXT_DIM, False),
-                ("commencer", texte("btn_commencer", self.langue),
-                 COL_TARGET, False)]))
+        if self.ecran == "accueil":
+            boutons.extend(self._rang_centree(w, h // 2 - 30, [
+                ("heberger", texte("btn_heberger"), COL_TARGET)], largeur=340))
+            boutons.extend(self._rang_centree(w, h // 2 + 34, [
+                ("rejoindre", texte("btn_rejoindre"), COL_COP)], largeur=340))
+            boutons.extend(self._rang_centree(w, h - 78, [
+                ("quitter", texte("btn_quitter"), COL_THIEF)], largeur=200,
+                hauteur=42))
+        else:
+            with self._verrou:
+                serveurs = list(self.serveurs)
+            geo = self._geometrie(h)
+            for i, srv in enumerate(serveurs[:NB_SERVEURS_AFFICHES]):
+                libelle = texte("serveur_trouve", hote=srv["host"])
+                boutons.extend(self._rang_centree(
+                    w, geo["serveurs"][i],
+                    [(f"serveur_{i}", libelle, COL_TARGET)],
+                    largeur=340, hauteur=42))
+            boutons.extend(self._rang_centree(w, geo["rafraichir"], [
+                ("rafraichir", texte("btn_rafraichir"), COL_TEXT)],
+                largeur=200, hauteur=40))
+            boutons.extend(self._rang_centree(w, geo["connecter"], [
+                ("connecter", texte("btn_connecter"), COL_TARGET)],
+                largeur=220, hauteur=44))
+            boutons.extend(self._rang_centree(w, geo["retour"], [
+                ("retour", texte("btn_retour"), COL_TEXT_DIM)],
+                largeur=160, hauteur=38))
         return boutons
 
     # ------------------------------------------------------------------ #
@@ -346,41 +296,67 @@ class Menu:
         w, h = screen.get_size()
         screen.fill(COL_BG)
 
-        # titre du jeu, centré en haut
-        titre = load_font(26, bold=True).render(texte("titre", self.langue),
-                                                True, COL_TEXT)
+        titre = load_font(27, bold=True).render(texte("titre"), True, COL_TEXT)
         screen.blit(titre, titre.get_rect(center=(w // 2, 52)))
+        sous = load_font(16).render(texte("menu_sous_titre"), True, COL_TEXT_DIM)
+        screen.blit(sous, sous.get_rect(center=(w // 2, 88)))
 
         boutons = self._construire()
 
-        if self.ecran == "mode":
-            sous_titre = load_font(17).render(
-                texte("menu_sous_titre", self.langue), True, COL_TEXT_DIM)
-            screen.blit(sous_titre, sous_titre.get_rect(center=(w // 2, h // 3 - 36)))
+        if self.ecran == "accueil":
+            self.champs["nom"].libelle = texte("champ_nom")
+            champ = self.champs["nom"]
+            rect = pygame.Rect(w // 2 - 170, h // 2 - 108, 340, 42)
+            champ.dessiner(screen, rect, souris)
+            aide = load_font(14).render(texte("menu_aide"), True, COL_TEXT_DIM)
+            screen.blit(aide, aide.get_rect(center=(w // 2, h // 2 + 108)))
+        else:
+            with self._verrou:
+                en_cours = self.recherche_en_cours
+                serveurs = list(self.serveurs)
+            geo = self._geometrie(h)
+            label = load_font(16, bold=True).render(
+                texte("decouverte_titre"), True, COL_TEXT)
+            screen.blit(label, label.get_rect(center=(w // 2, geo["label"])))
 
-        elif self.ecran == "solo":
-            r = load_font(17).render(texte("menu_role", self.langue), True,
-                                    COL_TEXT_DIM)
-            screen.blit(r, r.get_rect(center=(w // 2, h // 4 - 30)))
-            n = load_font(17).render(texte("menu_niveau", self.langue), True,
-                                    COL_TEXT_DIM)
-            screen.blit(n, n.get_rect(center=(w // 2, h // 4 + 66)))
-            bandeau = load_font(14).render(
-                texte("solo_bandeau", self.langue,
-                      role=texte("nom_voleur" if self.role == VOLEUR else "nom_police",
-                                 self.langue),
-                      niveau=texte(f"niveau_{self.niveau}", self.langue),
-                      role_ia=texte("nom_police" if self.role == VOLEUR else "nom_voleur",
-                                    self.langue)),
-                True, COL_TEXT)
-            screen.blit(bandeau, bandeau.get_rect(center=(w // 2, h // 4 + 130)))
+            if en_cours:
+                txt = texte("decouverte_recherche")
+            elif not serveurs:
+                txt = texte("decouverte_aucune")
+            else:
+                txt = ""
+            if txt:
+                img = load_font(14).render(txt, True, COL_TEXT_DIM)
+                screen.blit(img, img.get_rect(center=(w // 2, geo["status"])))
 
-        elif self.ecran == "ligne":
-            for champ in self.champs.values():
-                champ.dessiner(screen, champ.rect, souris)
-            if self.erreur:
-                err = load_font(15, bold=True).render(self.erreur, True, COL_THIEF)
-                screen.blit(err, err.get_rect(center=(w // 2, h // 4 + 3 * 78 + 44)))
+            champ = self.champs["host"]
+            rect = pygame.Rect(w // 2 - 170, geo["champ"], 340, 42)
+            champ.dessiner(screen, rect, souris)
+            if not self.erreur:
+                img = load_font(13).render(texte("champ_hote_aide"), True,
+                                           COL_TEXT_DIM)
+                screen.blit(img, img.get_rect(
+                    center=(w // 2, geo["champ"] + 58)))
+
+        if self.erreur:
+            img = load_font(15, bold=True).render(self.erreur, True, COL_THIEF)
+            y_erreur = (h - 40 if self.ecran == "accueil"
+                        else self._geometrie(h)["champ"] + 58)
+            screen.blit(img, img.get_rect(center=(w // 2, y_erreur)))
 
         for bouton in boutons:
             bouton.dessiner(screen, souris)
+
+    @staticmethod
+    def _geometrie(h):
+        """Positions verticales de l'écran « Rejoindre » (écran minimal 540 px)."""
+        top = max(96, h // 2 - 210)
+        return {
+            "label": top,
+            "status": top + 24,
+            "serveurs": [top + 46 + i * 46 for i in range(NB_SERVEURS_AFFICHES)],
+            "rafraichir": top + 188,
+            "champ": top + 266,
+            "connecter": top + 340,
+            "retour": top + 398,
+        }

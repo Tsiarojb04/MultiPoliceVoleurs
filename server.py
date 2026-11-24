@@ -1,32 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-server.py — Serveur du « Jeu du Gendarme et du Voleur » (mode en ligne).
+server.py — Serveur du « Jeu du Gendarme et du Voleur » (multijoueur en ligne).
 
 Serveur TCP multi-threads, sans dépendance externe (module `socket` seul).
-Il apparie les clients par salon de 2 joueurs (un VOLEUR + une POLICE),
-valide les coups avec la classe Game (partagée avec le jeu local) et
-diffuse l'état de la partie aux deux joueurs en temps réel.
+Il apparie les deux joueurs, valide les coups avec la classe Game et diffuse
+l'état de la partie en temps réel. Il peut être :
+
+  * lancé tout seul :  python server.py
+  * démarré automatiquement par main.py quand un joueur clique sur
+    « Héberger une partie » (c'est le cas normal).
+
+Dans les deux cas, le serveur annonce son adresse sur le réseau local via
+discovery.py : le second joueur n'a qu'à cliquer sur « Rejoindre ».
 
 Protocole (une ligne JSON par message, terminée par \\n) :
 
   Client -> Serveur :
     {"type": "join",   "role": "voleur"|"police"|"any", "name": "..."}
-    {"type": "move",   "frm": "te", "to": "E"}   (identifiants des nœuds)
+    {"type": "move",   "frm": "te", "to": "E"}
     {"type": "rematch"}
     {"type": "quit"}
 
   Serveur -> Client :
-    {"type": "waiting", "msg": "..."}                en attente d'un adversaire
-    {"type": "welcome", "role": "...", "adversaire": "..."} salon complet
-    {"type": "start", "state": {...}}               début de partie (état initial)
-    {"type": "state",  "state": {...}}              état après chaque coup validé
-    {"type": "error",  "msg": "..."}                coup illégal (émis à l'émetteur)
-    {"type": "info",   "msg": "..."}                déconnexion, rematch...
+    {"type": "waiting",   "msg": "..."}
+    {"type": "welcome",   "role": "...", "adversaire": "..."}
+    {"type": "start",     "state": {...}}
+    {"type": "state",     "state": {...}}
+    {"type": "error",     "msg": "..."}
+    {"type": "info",      "msg": "..."}
     {"type": "game_over", "winner": "...", "state": {...}}
-
-Lancement :
-    python server.py                 # écoute sur 0.0.0.0:5555
-    python server.py --host 127.0.0.1 --port 9000
 """
 
 import argparse
@@ -34,6 +36,7 @@ import json
 import socket
 import threading
 
+from discovery import Annonceur, ip_locale, port_libre
 from game import POLICE, VOLEUR, Game, IllegalMove
 
 HOST_PAR_DEFAUT = "0.0.0.0"
@@ -53,8 +56,8 @@ class Client:
         self.conn = conn
         self.addr = addr
         self.name = f"joueur@{addr[0]}:{addr[1]}"
-        self.souhait = None          # rôle demandé au moment du join
-        self.role = None              # rôle définitif : "voleur" ou "police"
+        self.souhait = None
+        self.role = None
         self.room = None
         self.send_lock = threading.Lock()
 
@@ -95,7 +98,6 @@ class Room:
         self.police = police
         self.rematch_votes = set()
 
-    # ------------------------------------------------------------------ #
     def start(self):
         """(Ré)initialise la partie et prévient les deux joueurs."""
         with self.lock:
@@ -105,18 +107,19 @@ class Room:
                 f"{self.police.name} (police)")
             for c, role in ((self.voleur, VOLEUR), (self.police, POLICE)):
                 adversaire = self.police if role == VOLEUR else self.voleur
-                c.send({"type": "welcome", "role": role, "adversaire": adversaire.name})
+                c.send({"type": "welcome", "role": role,
+                        "adversaire": adversaire.name})
                 c.send({"type": "start", "state": self.game.to_dict()})
 
     def broadcast(self, obj):
         for c in (self.voleur, self.police):
             c.send(obj)
 
-    # ------------------------------------------------------------------ #
     def handle_move(self, client, msg):
         with self.lock:
             if self.game.winner is not None:
-                client.send({"type": "error", "msg": "La partie est terminée (rematch pour rejouer)."})
+                client.send({"type": "error",
+                             "msg": "La partie est terminée (rematch pour rejouer)."})
                 return
             try:
                 self.game.move(client.role, msg.get("frm"), msg.get("to"))
@@ -134,14 +137,15 @@ class Room:
     def handle_rematch(self, client):
         with self.lock:
             if self.game.winner is None:
-                client.send({"type": "error", "msg": "La partie n'est pas encore terminée."})
+                client.send({"type": "error",
+                             "msg": "La partie n'est pas encore terminée."})
                 return
             self.rematch_votes.add(client.role)
             if len(self.rematch_votes) >= 2:
                 self.start()
             else:
                 self.broadcast({"type": "info",
-                               "msg": f"{client.name} veut rejouer (1/2)..."})
+                                "msg": f"{client.name} veut rejouer (1/2)..."})
 
     def leave(self, client):
         with self.lock:
@@ -158,23 +162,55 @@ class Room:
 
 
 class Serveur:
-    """Accepte les connexions et apparie les clients par salon de 2."""
+    """Accepte les connexions et apparie les clients par salon de 2.
 
-    def __init__(self, host, port):
+    `demarrer()` lance l'écoute dans un thread (pratique pour l'hébergement
+    intégré à main.py) ; `arreter()` libère les sockets proprement."""
+
+    def __init__(self, host=HOST_PAR_DEFAUT, port=PORT_PAR_DEFAUT,
+                 annoncer=True):
         self.host = host
         self.port = port
-        self.attente = []          # liste de Client en attente d'un adversaire
+        self.attente = []
         self.lock = threading.Lock()
+        self._srv = None
+        self._thread = None
+        self._arret = threading.Event()
+        self.annonceur = Annonceur(self.port) if annoncer else None
+
+    def demarrer(self):
+        self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._srv.bind((self.host, self.port))
+        self._srv.listen(8)
+        self._srv.settimeout(0.5)
+        self._thread = threading.Thread(target=self._boucle_accept, daemon=True)
+        self._thread.start()
+        if self.annonceur is not None:
+            self.annonceur.demarrer()
+        log(f"Écoute sur {self.host}:{self.port} — en attente de 2 joueurs...")
+        log(f"Adresse à partager avec l'autre joueur : "
+            f"{ip_locale()}:{self.port}")
+        return self
+
+    def _boucle_accept(self):
+        while not self._arret.is_set():
+            try:
+                conn, addr = self._srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            client = Client(conn, addr)
+            log(f"Nouvelle connexion : {client.name}")
+            threading.Thread(target=self.handle_client, args=(client,),
+                             daemon=True).start()
 
     def _apparier(self, nouveau):
-        """Apparie `nouveau` avec un client en attente, sinon le met en file.
-
-        Renvoie le salon créé, ou None si le client doit attendre."""
+        """Apparie `nouveau` avec un client en attente, sinon le met en file."""
         with self.lock:
             if self.attente:
                 ancien = self.attente.pop(0)
-                # attribution des rôles : priorité au premier arrivé,
-                # les indécis ("any") prennent le rôle restant.
                 if ancien.souhait in (VOLEUR, POLICE):
                     role_ancien = ancien.souhait
                 elif nouveau.souhait in (VOLEUR, POLICE):
@@ -210,8 +246,7 @@ class Serveur:
                     if room is None:
                         client.send({"type": "waiting",
                                      "msg": "En attente d'un adversaire..."})
-                        log(f"{client.name} attend un adversaire "
-                            f"(rôle souhaité : {souhait})")
+                        log(f"{client.name} attend un adversaire")
                     else:
                         room.start()
 
@@ -227,7 +262,8 @@ class Serveur:
                     break
 
                 elif mtype == "bad_message":
-                    client.send({"type": "error", "msg": "Message illisible (JSON attendu)."})
+                    client.send({"type": "error",
+                                 "msg": "Message illisible (JSON attendu)."})
         finally:
             if client.room is not None:
                 client.room.leave(client)
@@ -241,25 +277,33 @@ class Serveur:
                 pass
             log(f"Déconnexion de {client.name}")
 
+    def arreter(self):
+        """Arrête l'écoute, l'annonce UDP et attend la fin des threads."""
+        self._arret.set()
+        if self.annonceur is not None:
+            self.annonceur.arreter()
+        if self._srv is not None:
+            try:
+                self._srv.close()
+            except OSError:
+                pass
+            self._srv = None
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
     def run(self):
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((self.host, self.port))
-        srv.listen(8)
-        log(f"Écoute sur {self.host}:{self.port} — en attente de 2 joueurs...")
-        log(f"Sur chaque machine :  python client.py --host <ip_serveur> "
-            f"--port {self.port}")
+        """Lancement console : bloque jusqu'à Ctrl+C."""
+        if self.port == 0:
+            self.port = port_libre()
+        self.demarrer()
         try:
-            while True:
-                conn, addr = srv.accept()
-                client = Client(conn, addr)
-                log(f"Nouvelle connexion : {client.name}")
-                threading.Thread(target=self.handle_client, args=(client,),
-                                 daemon=True).start()
+            while self._thread is not None and not self._arret.is_set():
+                self._thread.join(timeout=0.5)
         except KeyboardInterrupt:
             log("Arrêt du serveur (Ctrl+C).")
         finally:
-            srv.close()
+            self.arreter()
 
 
 def main():

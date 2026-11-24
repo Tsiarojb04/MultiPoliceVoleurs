@@ -1,28 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-client.py — Client réseau du « Jeu du Gendarme et du Voleur » (pygame).
+client.py — Client du « Jeu du Gendarme et du Voleur » (multijoueur en ligne).
 
-Un joueur incarne le VOLEUR (pion rouge), l'autre la POLICE (pions bleus).
 Le client se connecte au serveur (server.py), reçoit l'état de la partie en
 temps réel et n'autorise la souris que pendant SON tour :
 
-  1. attendre « Bienvenue » + rôle attribué ;
-  2. cliquer sur un de ses pions pour le sélectionner ;
-  3. cliquer sur une destination verte pour jouer (envoyé au serveur,
-     qui valide le coup et diffuse le nouvel état aux deux joueurs).
+   1. attendre « Bienvenue » + rôle attribué automatiquement ;
+   2. cliquer sur un de ses pions pour le sélectionner ;
+   3. cliquer sur une destination verte pour jouer (le serveur valide et
+      diffuse le nouvel état aux deux joueurs).
 
-Lancement direct (ligne de commande) :
-    python client.py                              # 127.0.0.1:5555, rôle demandé
-    python client.py --host 192.168.1.20         # serveur distant
-    python client.py --role voleur                # forcer un rôle
-    python client.py --role police --name Alice --port 9000
+Lancement normal :  python main.py  (menu « Héberger » / « Rejoindre »).
+Lancement direct :  python client.py                (serveur détecté auto)
+                    python client.py --host 192.168.1.20
 
-Ou DEPUIS LE MENU de main.py (mode « En ligne ») : la fonction
-lancer_client() réutilise alors la fenêtre du menu.
-
-Touches : Échap = quitter, R = demander à rejouer (après une fin de partie).
-La fenêtre est redimensionnable (pygame.RESIZABLE) : le plateau est
-recalculé proportionnellement et reste exactement centré.
+Touches : Échap = quitter, R = proposer de rejouer après une fin de partie.
+La fenêtre est redimensionnable : le plateau reste centré et proportionnel.
 """
 
 import argparse
@@ -34,33 +27,33 @@ import threading
 
 import pygame
 
+from discovery import chercher_serveurs
 from game import POLICE, VOLEUR, Game
 from locales import set_langue, texte
-from render import COL_COP, COL_THIEF, Layout, draw_scene, load_font
+from render import COL_BG, COL_COP, COL_TEXT, COL_TEXT_DIM, COL_THIEF, \
+    Layout, draw_scene, load_font
 
 WIDTH, HEIGHT = 880, 920
-MIN_W, MIN_H = 480, 540   # taille minimale de la fenêtre (plateau jouable)
+MIN_W, MIN_H = 480, 540
 FPS = 60
+PORT_PAR_DEFAUT = 5555
 
 
 class Reseau:
-    """Gestion de la socket dans un thread dédié.
-
-    Les messages reçus sont poussés dans une file ; l'envoi des messages
-    se fait depuis la boucle principale (thread-safe via un verrou)."""
+    """Socket dans un thread dédié (réception) + envoi thread-safe."""
 
     def __init__(self, host, port):
         self.host = host
         self.port = port
         self.sock = None
-        self.recus = queue.Queue()       # messages à traiter par la boucle
+        self.recus = queue.Queue()
         self.lock = threading.Lock()
         self.connecte = False
         self.erreur = None
 
     def connecter(self):
         try:
-            self.sock = socket.create_connection((self.host, self.port), timeout=10)
+            self.sock = socket.create_connection((self.host, self.port), timeout=5)
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.sock.settimeout(None)
         except OSError as e:
@@ -110,51 +103,67 @@ class Reseau:
         self.connecte = False
 
 
-# ---------------------------------------------------------------------------
-# Boucle de jeu réseau — utilisable depuis le menu (screen fourni) ou
-# en ligne de commande (fenêtre créée ici)
-# ---------------------------------------------------------------------------
-def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
-    """Lance le client réseau dans une fenêtre pygame.
+def _ecran_connexion(screen, host, port):
+    """Affiche un message pendant la (courte) tentative de connexion."""
+    w, h = screen.get_size()
+    screen.fill(COL_BG)
+    img = load_font(24, bold=True).render(texte("net_connexion"), True, COL_TEXT)
+    screen.blit(img, img.get_rect(center=(w // 2, h // 2 - 20)))
+    petit = load_font(15).render(f"{host}:{port}", True, COL_TEXT_DIM)
+    screen.blit(petit, petit.get_rect(center=(w // 2, h // 2 + 20)))
+    pygame.display.flip()
 
-    * `screen` : fenêtre à réutiliser (celle du menu) ; si None, une
-      fenêtre redimensionnable est créée.
-    * `role` : VOLEUR, POLICE ou "any" (None -> "any").
 
-    Renvoie True si la session s'est déroulée (même finie), False si la
-    connexion au serveur a échoué."""
-    set_langue(langue)
-    role = role or "any"
+def lancer_client(host=None, port=None, nom=None, role="any", screen=None,
+                  partage=None):
+    """Lance le client dans une fenêtre pygame.
 
-    reseau = Reseau(host, port)
-    if not reseau.connecter():
-        return False
+    * `host` : adresse IP du serveur ; None / "" / "auto" -> détection
+      automatique d'une partie sur le réseau local ;
+    * `port` : port TCP (5555 par défaut) ;
+    * `screen` : fenêtre du menu à réutiliser (sinon une fenêtre est créée) ;
+    * `partage` : texte affiché à l'hôte (« partagez 192.168.x.y:5555 »).
 
-    # --- identification auprès du serveur ---
-    join = {"type": "join", "role": role}
-    if nom:
-        join["name"] = nom
-    reseau.envoyer(join)
+    Renvoie False si la connexion a échoué, True si la session s'est
+    déroulée (même terminée)."""
+    set_langue("fr")
+    port = PORT_PAR_DEFAUT if port is None else port
+    if not host or host == "auto":
+        serveurs = chercher_serveurs()
+        if not serveurs:
+            return False
+        host = serveurs[0]["host"]
+        port = serveurs[0]["port"]
 
-    # --- fenêtre pygame (redimensionnable ; réutilise celle du menu) ---
-    possede_fenetre = screen is not None
     if screen is None:
         pygame.init()
         info_ecran = pygame.display.Info()
         w0 = max(MIN_W, min(WIDTH, info_ecran.current_w - 80))
         h0 = max(MIN_H, min(HEIGHT, info_ecran.current_h - 120))
         screen = pygame.display.set_mode((w0, h0), pygame.RESIZABLE)
-    pygame.display.set_caption(texte("titre_ligne", langue))
+    _ecran_connexion(screen, host, port)
+
+    reseau = Reseau(host, port)
+    if not reseau.connecter():
+        return False
+
+    join = {"type": "join", "role": role or "any"}
+    if nom:
+        join["name"] = nom
+    reseau.envoyer(join)
+
+    pygame.display.set_caption(texte("titre_ligne"))
     clock = pygame.time.Clock()
     layout = Layout(*screen.get_size())
     font_titre = load_font(16, bold=True)
-    font_centre = load_font(26, bold=True)
+    font_centre = load_font(24, bold=True)
+    font_petit = load_font(15)
 
-    game = None                 # miroir local de l'état (None = en attente)
+    game = None
     mon_role = None
     adversaire = "?"
     selected, targets = None, []
-    info = texte("net_connexion", langue)
+    info = texte("net_attente")
 
     running = True
     while running:
@@ -168,11 +177,11 @@ def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
         for msg in messages:
             mtype = msg.get("type")
             if mtype == "waiting":
-                info = msg.get("msg", texte("net_attente", langue))
+                info = msg.get("msg", texte("net_attente"))
             elif mtype == "welcome":
                 mon_role = msg.get("role")
                 adversaire = msg.get("adversaire", "?")
-                info = texte("net_adversaire", langue, qui=adversaire)
+                info = texte("net_adversaire", qui=adversaire)
                 selected, targets = None, []
             elif mtype in ("start", "state"):
                 game = Game.from_dict(msg["state"])
@@ -181,9 +190,9 @@ def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
             elif mtype == "game_over":
                 game = Game.from_dict(msg["state"])
                 selected, targets = None, []
-                info = texte("net_termine", langue)
+                info = texte("net_termine")
             elif mtype == "error":
-                info = texte("net_refuse", langue, msg=msg.get("msg", "?"))
+                info = texte("net_refuse", msg=msg.get("msg", "?"))
                 selected, targets = None, []
             elif mtype == "info":
                 info = msg.get("msg", "")
@@ -193,9 +202,6 @@ def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.VIDEORESIZE:
-                # --- REDIMENSIONNEMENT : échelle et centrage recalculés
-                #     dynamiquement pour que le plateau reste entièrement
-                #     visible et exactement centré dans la nouvelle fenêtre
                 w, h = max(MIN_W, event.w), max(MIN_H, event.h)
                 if (event.w, event.h) != (w, h):
                     screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
@@ -206,19 +212,18 @@ def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
                 elif event.key == pygame.K_r:
                     if game is not None and game.winner is not None:
                         reseau.envoyer({"type": "rematch"})
-                        info = texte("net_rematch", langue)
+                        info = texte("net_rematch")
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # on ne joue que pendant SON tour, sur SES pions
                 if game is None or game.winner is not None or mon_role != game.turn:
                     if game is not None and mon_role != game.turn and game.winner is None:
-                        info = texte("net_pas_tour", langue)
+                        info = texte("net_pas_tour")
                     continue
                 node = layout.pick_node(event.pos)
                 if node is None:
                     continue
                 if selected and node in targets:
                     reseau.envoyer({"type": "move", "frm": selected, "to": node})
-                    info = texte("net_envoye", langue, frm=selected, to=node)
+                    info = texte("net_envoye", frm=selected, to=node)
                     selected, targets = None, []
                 elif node in game.pieces_of(mon_role):
                     selected = node
@@ -226,31 +231,40 @@ def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
                         targets = game.legal_targets(mon_role, node)
                     except Exception:
                         targets = []
-                    info = texte("info_selection", langue, qui="", node=node)
+                    info = texte("info_selection", qui="", node=node)
                 else:
                     selected, targets = None, []
 
         # ---------- affichage ----------
         w_fen, h_fen = screen.get_size()
         if game is None:
-            screen.fill((24, 26, 34))
-            texte_img = font_centre.render(texte("net_attente", langue), True,
-                                           (220, 220, 228))
-            screen.blit(texte_img,
-                        texte_img.get_rect(center=(w_fen // 2, h_fen // 2 - 40)))
-            petit = load_font(15).render(
-                texte("net_serveur_role", langue, hote=host, port=port,
-                      role=role), True, (150, 152, 165))
-            screen.blit(petit, petit.get_rect(center=(w_fen // 2, h_fen // 2)))
+            screen.fill(COL_BG)
+            attente = font_centre.render(texte("net_attente"), True, COL_TEXT)
+            screen.blit(attente, attente.get_rect(
+                center=(w_fen // 2, h_fen // 2 - 60)))
+            if partage:
+                img = load_font(17, bold=True).render(texte("net_partage"),
+                                                      True, COL_TEXT)
+                screen.blit(img, img.get_rect(center=(w_fen // 2, h_fen // 2 - 10)))
+                img = load_font(26, bold=True).render(partage, True, COL_THIEF)
+                screen.blit(img, img.get_rect(center=(w_fen // 2, h_fen // 2 + 30)))
+                img = font_petit.render(texte("net_partage_aide"), True,
+                                        COL_TEXT_DIM)
+                screen.blit(img, img.get_rect(center=(w_fen // 2, h_fen // 2 + 70)))
+            else:
+                img = font_petit.render(f"{host}:{port}", True, COL_TEXT_DIM)
+                screen.blit(img, img.get_rect(center=(w_fen // 2, h_fen // 2 - 10)))
+            if info:
+                img = font_petit.render(info, True, COL_TEXT_DIM)
+                screen.blit(img, img.get_rect(center=(w_fen // 2, h_fen // 2 + 120)))
         else:
-            draw_scene(screen, layout, game, selected, targets, info, langue)
-            # bandeau indiquant QUI on est
+            draw_scene(screen, layout, game, selected, targets, info)
             couleur = COL_THIEF if mon_role == VOLEUR else COL_COP
-            libelle = (texte("net_vous_voleur", langue) if mon_role == VOLEUR
-                       else texte("net_vous_police", langue))
+            libelle = (texte("net_vous_voleur") if mon_role == VOLEUR
+                       else texte("net_vous_police"))
             screen.blit(font_titre.render(
-                f"{libelle}  —  {texte('net_adversaire_court', langue)} : "
-                f"{adversaire}", True, couleur), (12, 8))
+                f"{libelle}  —  {texte('net_adversaire_court')} : {adversaire}",
+                True, couleur), (12, 8))
 
         pygame.display.flip()
         clock.tick(FPS)
@@ -259,39 +273,18 @@ def lancer_client(host, port, nom=None, role=None, langue="fr", screen=None):
     return True
 
 
-# ---------------------------------------------------------------------------
-# Utilisation en ligne de commande
-# ---------------------------------------------------------------------------
-def choisir_role_console(langue="fr"):
-    print(texte("con_role_titre", langue))
-    print(texte("con_role_options", langue))
-    rep = input(texte("con_role_choix", langue)).strip().lower()
-    return {"v": VOLEUR, "p": POLICE}.get(rep, "any")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Client du jeu Gendarme & Voleur")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--host", default=None,
+                        help="IP du serveur (détection automatique si omise)")
+    parser.add_argument("--port", type=int, default=PORT_PAR_DEFAUT)
     parser.add_argument("--name", default=None)
-    parser.add_argument("--langue", default="fr", choices=("fr", "mg"))
-    parser.add_argument("--role", choices=[VOLEUR, POLICE, "any", "a", "v", "p"],
-                        default=None)
     args = parser.parse_args()
 
-    role_voulu = args.role
-    if role_voulu in ("a",):
-        role_voulu = "any"
-    elif role_voulu in ("v",):
-        role_voulu = VOLEUR
-    elif role_voulu in ("p",):
-        role_voulu = POLICE
-    if role_voulu is None:
-        role_voulu = choisir_role_console(args.langue)
-
-    ok = lancer_client(args.host, args.port, args.name, role_voulu, args.langue)
+    ok = lancer_client(args.host, args.port, args.name, role="any")
     if not ok:
-        print("Erreur : connexion impossible.")
+        print("Aucun serveur trouvé : lancez 'python main.py' chez l'hôte, "
+              "ou indiquez son IP avec --host.")
         sys.exit(1)
     pygame.quit()
     sys.exit(0)

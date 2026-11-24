@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """test_rendu.py — Vérifications PIXELS du rendu (render.py) sur 5 tailles
 de fenêtre (mode responsive), avec le pilote vidéo « dummy ».
 
@@ -10,7 +10,7 @@ Vérifie notamment :
     (minimalisme : seules les couleurs du plateau et des pions y sont
     autorisées) ;
   * l'anneau de sélection jaune et les anneaux verts des destinations ;
-  * la barre d'état contient du texte et son rendu change entre FR et MG.
+  * la barre d'état contient du texte (en français).
 """
 import os
 import sys
@@ -144,22 +144,16 @@ for (w, h) in TAILLES:
 
     print(f"taille {etiquette} : OK")
 
-# ------------------------------------------------- i18n (une fois, 880x920)
+# ----------------------------- barre d'état en français (une fois, 880x920)
 screen = pygame.display.set_mode((880, 920))
 layout = Layout(880, 920)
 g3 = Game()
 g3.winner = "voleur"
-a = pygame.Surface((880, 920))
-b = pygame.Surface((880, 920))
-draw_status(a, layout, g3, "", "fr")
-draw_status(b, layout, g3, "", "mg")
-en_octets = getattr(pygame.image, "tobytes", None) or pygame.image.tostring
-ok(en_octets(a, "RGB") != en_octets(b, "RGB"),
-   "rendu de la barre d'état : FR != MG")
-ok(g3.progress_text("fr") != g3.progress_text("mg"), "progression traduite")
-ok("GAGNE" in g3.status_text("fr") and "Nandresy" in g3.status_text("mg"),
-   "messages de victoire traduits")
-print(f"i18n rendu : OK")
+img = pygame.Surface((880, 920))
+draw_status(img, layout, g3, "", "fr")
+ok("GAGNE" in g3.status_text("fr"), "message de victoire français")
+ok("circuit" in g3.progress_text("fr").lower(), "progression française")
+print("rendu de la barre d'état (français) : OK")
 
-print(f"test_rendu : TOUS OK — {NB + 3} vérifications")
+print(f"test_rendu : TOUS OK - {NB + 2} vérifications")
 

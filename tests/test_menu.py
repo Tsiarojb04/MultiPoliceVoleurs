@@ -1,16 +1,13 @@
-﻿# -*- coding: utf-8 -*-
-"""test_menu.py — Tests non interactifs du menu de démarrage (menu.py).
+# -*- coding: utf-8 -*-
+"""test_menu.py — Tests non interactifs de l'écran de connexion (menu.py).
 
 Vérifie, avec le pilote vidéo « dummy » (aucune fenêtre réelle) :
-  1. le rendu des trois écrans (mode / solo / ligne) en FR et en MG ;
-  2. les identifiants des boutons construits sur chaque écran ;
-  3. la construction des configurations via _activer : solo (rôle +
-     niveau), local, ligne (host / port / nom / rôle) ;
-  4. la validation du port (message d'erreur inline) ;
-  5. la sentinelle _QUITTER, le bouton Retour, la bascule de langue ;
-  6. la saisie clavier des champs texte (ChampTexte.taper) ;
-  7. bonus : degrés du plateau (le blocage TOTAL de la police est-il
-     possible ? — utile pour justifier le garde-fou ia_passe de main.py).
+  1. le rendu des deux écrans (accueil / rejoindre) ;
+  2. les identifiants des boutons ;
+  3. les configurations renvoyées (hébergement, partie détectée, IP saisie) ;
+  4. le refus d'une adresse vide ;
+  5. la sentinelle _QUITTER, le retour et la saisie clavier ;
+  6. la détection UDP d'un serveur local (discovery.py).
 """
 import os
 import sys
@@ -23,107 +20,88 @@ import pygame
 pygame.init()
 screen = pygame.display.set_mode((880, 920))
 
-from board import NEIGHBORS
+from discovery import Annonceur, chercher_serveurs
 from menu import _QUITTER, ChampTexte, Menu
 
 # ------------------------------------------------------------------ 1. rendu
-for langue in ("fr", "mg"):
-    m = Menu(langue)
-    for ecran in ("mode", "solo", "ligne"):
-        m.ecran = ecran
-        boutons = m._construire()
-        assert boutons, "aucun bouton construit"
-        m._dessiner(screen, (0, 0))
-        pygame.display.flip()
-    print(f"1. rendu mode/solo/ligne [{langue}] : OK")
+m = Menu()
+for ecran in ("accueil", "rejoindre"):
+    m.ecran = ecran
+    boutons = m._construire()
+    assert boutons, "aucun bouton construit"
+    m._dessiner(screen, (0, 0))
+    pygame.display.flip()
+print("1. rendu accueil/rejoindre : OK")
 
 # ------------------------------------------- 2. identifiants par écran
-m = Menu("fr")
-m.ecran = "mode"
-assert [b.id for b in m._construire()] == [
-    "langue", "mode_solo", "mode_local", "mode_ligne", "quitter"]
-m.ecran = "solo"
-assert [b.id for b in m._construire()] == [
-    "langue", "role_voleur", "role_police",
-    "niveau_mora", "niveau_antonony", "niveau_sarotra",
-    "retour", "commencer"]
-m.ecran = "ligne"
-assert [b.id for b in m._construire()] == [
-    "langue", "ligne_role_voleur", "ligne_role_police", "ligne_role_any",
-    "retour", "commencer"]
+m = Menu()
+m.ecran = "accueil"
+assert [b.id for b in m._construire()] == ["heberger", "rejoindre", "quitter"]
+m.ecran = "rejoindre"
+assert [b.id for b in m._construire()] == ["rafraichir", "connecter", "retour"]
+m.serveurs = [{"host": "192.168.1.20", "port": 5555}]
+assert "serveur_0" in [b.id for b in m._construire()]
 print("2. identifiants des boutons par écran : OK")
 
-# -------------------------------------------------------- 3. config SOLO
-m = Menu("fr")
-assert m._activer("mode_solo") is None and m.ecran == "solo"
-assert m._activer("role_police") is None and m.role == "police"
-assert m._activer("niveau_sarotra") is None and m.niveau == "sarotra"
-cfg = m._activer("commencer")
-assert cfg == {"mode": "solo", "role": "police", "niveau": "sarotra",
-               "langue": "fr"}, cfg
-print("3. config solo (police / sarotra / fr) : OK")
+# ------------------------------------------------------- 3. configurations
+m = Menu()
+m.champs["nom"].valeur = " Alice "
+assert m._activer("heberger") == {"action": "host", "nom": "Alice"}
 
-m = Menu("mg")                       # valeurs par défaut : voleur / antonony
-m._activer("mode_solo")
-cfg = m._activer("commencer")
-assert cfg == {"mode": "solo", "role": "voleur", "niveau": "antonony",
-               "langue": "mg"}, cfg
-print("   défauts (voleur / antonony / mg) : OK")
+m = Menu()
+assert m._activer("rejoindre") is None and m.ecran == "rejoindre"
+m.serveurs = [{"host": "192.168.1.20", "port": 6000}]
+cfg = m._activer("serveur_0")
+assert cfg == {"action": "join", "host": "192.168.1.20", "port": 6000,
+               "nom": None}, cfg
+print("3. config hébergement + partie détectée : OK")
 
-# ------------------------------------------------------- 4. config LOCAL
-m = Menu("fr")
-assert m._activer("mode_local") == {"mode": "local", "langue": "fr"}
-print("4. config local : OK")
+m = Menu()
+m.champs["host"].valeur = " 10.0.0.5 "
+cfg = m._activer("connecter")
+assert cfg == {"action": "join", "host": "10.0.0.5", "port": 5555,
+               "nom": None}, cfg
+m.champs["host"].valeur = "10.0.0.5:6001"
+assert m._activer("connecter")["port"] == 6001
+m.champs["host"].valeur = "10.0.0.5:abc"
+assert m._activer("connecter") is None and m.erreur
+print("   config IP saisie (IP:port ou port par défaut) : OK")
 
-# ------------------------------------------------------- 5. config LIGNE
-m = Menu("fr")
-m._activer("mode_ligne")
-assert m.ecran == "ligne"
-m.champs["port"].valeur = "abc"            # port non numérique
-assert m._activer("commencer") is None and m.erreur, "port 'abc' accepté !"
-m.champs["port"].valeur = "99999"          # hors bornes
-assert m._activer("commencer") is None and m.erreur, "port 99999 accepté !"
-m.champs["host"].valeur = "192.168.1.20"
-m.champs["port"].valeur = " 5555 "
-m.champs["nom"].valeur = "Alice"
-m._activer("ligne_role_police")
-cfg = m._activer("commencer")
-assert cfg == {"mode": "ligne", "host": "192.168.1.20", "port": 5555,
-               "nom": "Alice", "role": "police", "langue": "fr"}, cfg
-print("5. config ligne (validation du port incluse) : OK")
+# ------------------------------------------------- 4. adresse vide refusée
+m = Menu()
+assert m._activer("connecter") is None and m.erreur
+print("4. adresse vide refusée : OK")
 
-m = Menu("fr")                             # nom vide -> None, rôle any
-m._activer("mode_ligne")
-cfg = m._activer("commencer")
-assert cfg["nom"] is None and cfg["role"] == "any" and cfg["host"] == "127.0.0.1"
-print("   défauts ligne (127.0.0.1:5555, nom None, any) : OK")
-
-# --------------------------------------- 6. quitter / Échap / retour / langue
-m = Menu("fr")
+# ------------------------------- 5. quitter / retour / saisie clavier
+m = Menu()
 assert m._activer("quitter") is _QUITTER
 ev_esc = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE, unicode="")
-m.ecran = "mode"
 assert m._touche(ev_esc) is _QUITTER
-m.ecran = "solo"
-assert m._touche(ev_esc) is None and m.ecran == "mode"      # retour
-m._activer("langue"); assert m.langue == "mg"
-m._activer("langue"); assert m.langue == "fr"
-print("6. quitter / Échap / retour / bascule langue : OK")
+m._activer("rejoindre")
+assert m._touche(ev_esc) is None and m.ecran == "accueil"
+assert m._activer("retour") is None and m.ecran == "accueil"
 
-# --------------------------------------------------------- 7. ChampTexte
 c = ChampTexte("x", "libellé", "")
 c.taper(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_a, unicode="a"))
 c.taper(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_b, unicode="b"))
 assert c.valeur == "ab"
 c.taper(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_BACKSPACE, unicode=""))
 assert c.valeur == "a"
-print("7. saisie ChampTexte : OK")
+print("5. quitter / retour / saisie clavier : OK")
 
-# -------------------------------------------------------- 8. degrés plateau
-degres = {n: len(v) for n, v in NEIGHBORS.items()}
-print(f"8. degrés des {len(degres)} nœuds : min={min(degres.values())}, "
-      f"max={max(degres.values())}, "
-      f"moyen={sum(degres.values()) / len(degres):.2f}")
+# --------------------------------------- 6. découverte UDP locale
+import discovery
+port_udp_test = 56789
+discovery.PORT_DECOUVERTE = port_udp_test
+annonce = Annonceur(port_tcp=5555, host="127.0.0.1")
+annonce.PORT_DECOUVERTE = port_udp_test
+# l'annonceur lit la constante globale au moment du bind
+try:
+    assert annonce.demarrer(), "bind UDP impossible"
+    trouves = chercher_serveurs(delai=0.8, port=port_udp_test)
+    assert {"host": "127.0.0.1", "port": 5555} in trouves, trouves
+    print(f"6. découverte UDP : {trouves} : OK")
+finally:
+    annonce.arreter()
 
 print("test_menu : TOUS OK")
-

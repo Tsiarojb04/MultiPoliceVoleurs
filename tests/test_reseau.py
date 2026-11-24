@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """test_reseau.py — Test du protocole réseau avec SOCKETS BRUTS.
 
 Démarre server.py en sous-processus sur un port libre, puis rejoue un
@@ -14,12 +14,14 @@ dialogue complet client/serveur :
   9. quit -> l'adversaire est informé de la déconnexion.
 """
 import json
+import os
 import socket
 import subprocess
 import sys
 import time
 
-RACINE = r"D:\Info_L3\S6\IA"
+RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, RACINE)
 
 
 class MiniClient:
@@ -75,6 +77,12 @@ try:
             time.sleep(0.1)
     else:
         raise RuntimeError("le serveur n'a pas démarré")
+
+    # ------------------------- 0. découverte automatique du serveur lance
+    from discovery import chercher_serveurs
+    trouves = chercher_serveurs(delai=1.0)
+    assert any(s["port"] == port for s in trouves), (port, trouves)
+    print("0. serveur découvert automatiquement sur le réseau local : OK")
 
     # ---------------------------------------------- 1. join + appariement
     A = MiniClient("127.0.0.1", port)

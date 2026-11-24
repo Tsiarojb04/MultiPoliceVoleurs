@@ -33,7 +33,7 @@ from locales import texte
 VOLEUR = "voleur"
 POLICE = "police"
 
-# Voisins pré-triés (stable pour l'IA et l'affichage, évite un sorted()
+# Voisins pré-triés (stable pour l'affichage, évite un sorted()
 # à chaque appel de legal_targets)
 _VOISINS_TRIES = {n: sorted(v) for n, v in NEIGHBORS.items()}
 
@@ -51,8 +51,8 @@ class IllegalMove(Exception):
 
 class Game:
     """État complet d'une partie + règles. Aucune dépendance à pygame :
-    cette classe est partagée par le jeu local (main.py), le client réseau
-    (client.py) et le serveur (server.py)."""
+    cette classe est partagée par le client (client.py) et le serveur
+    (server.py) du mode multijoueur en ligne."""
 
     def __init__(self):
         self.thief = INITIAL_THIEF
@@ -192,24 +192,6 @@ class Game:
         if self.winner is None and self.turn == VOLEUR \
                 and not self.has_legal_move(VOLEUR):
             self.winner = POLICE
-
-    # ------------------------------------------------------------------ #
-    # Copie légère (recherche de l'IA : minimax / alpha-bêta)
-    # ------------------------------------------------------------------ #
-    def clone(self):
-        """Copie indépendante de l'état (sans l'historique des coups).
-
-        Utilisée par ai.py pour explorer les coups possibles sans
-        modifier la partie en cours."""
-        g = Game.__new__(Game)
-        g.thief = self.thief
-        g.cops = list(self.cops)
-        g.turn = self.turn
-        g.winner = self.winner
-        g.gates_visited = set(self.gates_visited)
-        g.move_count = self.move_count
-        g.history = []
-        return g
 
     # ------------------------------------------------------------------ #
     def progress_text(self, langue=None):

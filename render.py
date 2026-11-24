@@ -13,8 +13,8 @@ Rendu volontairement MINIMALISTE, conforme au dessin à la main (Jeu.png) :
     sont visibles (rouge = voleur, bleus = police), plus les indications
     de jeu (pion sélectionné, destinations légales, barre d'état).
 
-Ce module centralise tout ce qui est graphique afin que main.py (jeu local)
-et client.py (jeu en réseau) partagent exactement le même rendu.
+Ce module centralise tout ce qui est graphique afin que le menu, la salle
+d'attente et la partie en ligne partagent exactement le même rendu.
 
 AFFICHAGE RESPONSIVE : la fenêtre est redimensionnable (pygame.RESIZABLE).
 La classe Layout recalcule le centre du plateau et le rayon du grand cercle
@@ -180,7 +180,7 @@ def draw_status(screen, layout, game, info="", langue=None):
     f_titre = load_font(15, bold=True)
     f_txt = load_font(14)
 
-    # ligne 1 : tour actuel / vainqueur (traduit FR / MG)
+    # ligne 1 : tour actuel / vainqueur
     if game.winner == VOLEUR:
         ligne1 = f_titre.render(texte("victoire_voleur", langue), True, COL_THIEF)
     elif game.winner == POLICE:

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """test_resize.py — Test du REDIMENSIONNEMENT (fenêtre responsive).
 
 Le pilote vidéo « dummy » n'applique pas réellement les changements de
@@ -67,9 +67,9 @@ screen = pygame.display.set_mode((880, 920))
 for (w, h) in [(640, 700), (1200, 1000), (480, 540), (880, 920)]:
     screen = pygame.display.set_mode((w, h))
     lay = Layout(*screen.get_size())
-    draw_scene(screen, lay, Game(), langue="mg")
+    draw_scene(screen, lay, Game(), langue="fr")
     assert lay.scale <= min(w, h - STATUS_H) / 2
-print("suite de redimensionnements + rendu MG : OK")
+print("suite de redimensionnements + rendu : OK")
 
 pygame.quit()          # évite un segfault SDL à la fermeture (dummy + set_mode répétés)
 print("test_resize : TOUS OK")
