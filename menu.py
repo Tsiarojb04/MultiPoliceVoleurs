@@ -10,8 +10,10 @@ Deux actions seulement :
     sont détectés automatiquement et affichés sous forme de boutons. En
     secours, un champ permet de saisir l'adresse IP de l'hôte.
 
-Aucun choix de rôle, de difficulté, de langue ou de port : les rôles sont
-attribués automatiquement et le port par défaut est utilisé partout.
+Aucun choix de rôle ou de port : les rôles sont attribués automatiquement
+et le port par défaut est utilisé partout. Touche `L` : basculer la langue
+des textes (français / malgache). Le mode « Auto-Play (IA vs IA) » se règle
+ensuite dans la salle d'attente ou directement dans le HUD.
 
 Menu.run(screen) renvoie :
     {"action": "host", "nom": "Alice" | None}
@@ -24,7 +26,7 @@ import threading
 import pygame
 
 from discovery import chercher_serveurs
-from locales import texte
+from locales import langue_courante, set_langue, texte
 from render import (COL_BG, COL_BOARD, COL_COP, COL_SEL, COL_STATUS_BG,
                     COL_TARGET, COL_TEXT, COL_TEXT_DIM, COL_THIEF, load_font)
 
@@ -169,6 +171,12 @@ class Menu:
             self.ecran = "accueil"
             self.erreur = ""
             self.champ_actif = None
+        elif event.key == pygame.K_l:
+            # Français / Malagasy : les textes sont relus à chaque frame.
+            set_langue("mg" if langue_courante() == "fr" else "fr")
+            for ident, champ in self.champs.items():
+                champ.libelle = texte("champ_nom" if ident == "nom"
+                                      else "champ_hote")
         return None
 
     def _clic(self, pos):

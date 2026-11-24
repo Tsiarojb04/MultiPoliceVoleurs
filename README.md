@@ -1,9 +1,11 @@
 # Jeu du Gendarme et du Voleur — multijoueur en ligne
 
 Jeu de stratégie tour par tour en Python + **Pygame**, **uniquement en
-multijoueur en ligne**. Le mode solo (IA), le mode deux joueurs sur le même
-écran, le choix du rôle, de la difficulté et de la langue ont été retirés :
-il ne reste que l'essentiel, deux joueurs qui se connectent facilement.
+multijoueur en ligne**. Deux joueurs se connectent facilement et, s'ils le
+souhaitent, peuvent transformer la partie en duel d'IA entièrement
+automatique : **Auto-Play (IA vs IA) / Mode Spectateur IA**.
+
+Langues disponibles : français et malgache (`L` dans le menu pour basculer).
 
 ## Connexion en 2 gestes
 
@@ -40,11 +42,40 @@ python client.py                 # détecte automatiquement le serveur
 python client.py --host 192.168.1.20   # ou connexion manuelle
 ```
 
+## Mode Auto-Play (IA vs IA / spectateur)
+
+Le bouton **« Auto-Play (IA) : OFF/ON »** est disponible dans la salle
+d'attente **et** dans le HUD, avec un bouton de difficulté (`Mora` = facile,
+`Antonony` = moyen, `Sarotra` = difficile, ce dernier étant le défaut
+équilibré). Un raccourci `A` bascule aussi le mode.
+
+Lorsqu'il est actif :
+
+- **le serveur** calcule les coups de la police *et* du voleur avec `ai.py`,
+  puis diffuse le même état aux deux écrans : aucun risque de désync ;
+- les clics sur le plateau sont ignorés des deux côtés ; les boutons du HUD
+  (désactiver le mode, changer la difficulté, rejouer) et `Échap` restent
+  utilisables ;
+- la bascule est immédiate, même en cours de partie : reprendre le contrôle
+  rend la main au joueur dont c'est le tour ;
+- en fin de partie, l'écran de victoire s'affiche sur les deux clients et
+  **« Rejouer (R) »** relance une partie spectateur (un seul spectateur
+  suffit à voter).
+
+Un garde-fou de 200 coups départage les parties qui n'aboutissent pas
+(vainqueur choisi selon l'évaluation de la position). Le rythme des coups
+peut être réglé pour les tests via les variables d'environnement
+`POLICE_VOLEUR_AUTO_DELAI` (défaut `0.45` s) et
+`POLICE_VOLEUR_AUTO_TEMPS` (budget de recherche Sarotra, défaut `0.35` s).
+
 ## Commandes pendant la partie
 
 - cliquer sur **un de ses pions**, puis sur une **destination verte** ;
-- `R` : proposer de rejouer (les deux joueurs doivent être d'accord) ;
-- `Échap` : quitter la partie et revenir à l'écran de connexion.
+- `A` : activer / désactiver l'Auto-Play ;
+- `R` : proposer de rejouer (les deux joueurs doivent être d'accord, sauf
+  en mode Auto-Play où un suffit) ;
+- `Échap` : quitter la partie et revenir à l'écran de connexion ;
+- `L` (menu) : français / malgache.
 
 La fenêtre est redimensionnable : le plateau, les pions et la barre d'état
 sont recalculés proportionnellement et restent centrés.
@@ -69,17 +100,20 @@ les règles dans `game.py`, le rendu dans `render.py`.
 | `main.py` | Interface de connexion et lancement du jeu |
 | `menu.py` | Écran « Héberger » / « Rejoindre » + détection des parties |
 | `discovery.py` | Annonce UDP et recherche des serveurs sur le LAN |
-| `server.py` | Serveur TCP : appariage, validation des coups, diffusion |
-| `client.py` | Client pygame : réception de l'état et coups de l'utilisateur |
+| `server.py` | Serveur TCP : appariage, validation des coups, diffusion et pilotage IA du mode Auto-Play |
+| `client.py` | Client pygame : réception de l'état, coups et HUD Auto-Play |
+| `ai.py` | IA réintroduite du solo : Mora / Antonony / Sarotra (minimax alpha-bêta) |
 | `game.py`, `board.py`, `render.py` | Règles, plateau et affichage partagés |
-| `locales.py` | Textes affichés (français) |
+| `locales.py` | Textes affichés (français / malgache) |
 
 ## Tests
 
 ```bash
 python game.py
+python ai.py
 python locales.py
 python tests/test_menu.py
+python tests/test_ia_auto.py
 python tests/test_rendu.py
 python tests/test_resize.py
 python tests/test_reseau.py

@@ -18,6 +18,8 @@ Protocole (une ligne JSON par message, terminée par \\n) :
   Client -> Serveur :
     {"type": "join",   "role": "voleur"|"police"|"any", "name": "..."}
     {"type": "move",   "frm": "te", "to": "E"}
+    {"type": "auto",   "enabled": true|false}
+    {"type": "niveau", "niveau": "mora"|"antonony"|"sarotra"}
     {"type": "rematch"}
     {"type": "quit"}
 
@@ -26,23 +28,42 @@ Protocole (une ligne JSON par message, terminée par \\n) :
     {"type": "welcome",   "role": "...", "adversaire": "..."}
     {"type": "start",     "state": {...}}
     {"type": "state",     "state": {...}}
+    {"type": "auto",      "enabled": ..., "niveau": "...", "msg": "..."}
     {"type": "error",     "msg": "..."}
     {"type": "info",      "msg": "..."}
     {"type": "game_over", "winner": "...", "state": {...}}
+
+Tous les messages de partie (welcome/start/state/game_over/auto) portent
+aussi les champs "auto" et "niveau" : le mode spectateur reste synchronisé
+même si un client manque une notification.
+
+Mode « Auto-Play (IA vs IA) » : le SERVEUR calcule les coups des deux camps
+avec ai.py (un seul calcul, diffusé ensuite aux deux clients). Les coups
+manuels sont refusés tant que le mode est actif. La bascule peut avoir lieu
+à tout moment, y compris pendant une partie.
 """
 
 import argparse
 import json
+import os
 import socket
 import threading
 
+from ai import NIVEAU_DEFAUT, NIVEAUX, choisir_coup, evaluer
 from discovery import Annonceur, ip_locale, port_libre
 from game import POLICE, VOLEUR, Game, IllegalMove
+from locales import texte
 
 HOST_PAR_DEFAUT = "0.0.0.0"
 PORT_PAR_DEFAUT = 5555
 
 AUTRE_ROLE = {VOLEUR: POLICE, POLICE: VOLEUR}
+
+# Réglages du mode spectateur (variables d'environnement pratiques pour les
+# tests : on peut accélérer le rythme des coups sans toucher au jeu).
+DELAI_AUTO = float(os.environ.get("POLICE_VOLEUR_AUTO_DELAI", "0.45"))
+TEMPS_IA_AUTO = float(os.environ.get("POLICE_VOLEUR_AUTO_TEMPS", "0.35"))
+AUTO_MAX_COUPS = 200       # garde-fou contre une partie IA vs IA interminable
 
 
 def log(msg):
@@ -59,6 +80,10 @@ class Client:
         self.souhait = None
         self.role = None
         self.room = None
+        # Préférences de mode spectateur, même avant l'appariement : elles
+        # sont appliquées dès que la Room est créée.
+        self.auto = False
+        self.niveau = NIVEAU_DEFAUT
         self.send_lock = threading.Lock()
 
     def send(self, obj):
@@ -93,30 +118,147 @@ class Room:
 
     def __init__(self, voleur, police):
         self.lock = threading.RLock()
+        self.cond = threading.Condition(self.lock)
         self.game = Game()
         self.voleur = voleur
         self.police = police
         self.rematch_votes = set()
+
+        # Mode Auto-Play : n'importe quel joueur peut l'activer/désactiver.
+        # Les préférences exprimées dans la salle d'attente sont conservées.
+        self.auto = bool(voleur.auto or police.auto)
+        self.niveau = (voleur.niveau if voleur.niveau != NIVEAU_DEFAUT
+                       else police.niveau)
+        self._thread_auto = None
+        self._arret_auto = threading.Event()
+
+    # ------------------------------------------------------------------ #
+    # Mode spectateur IA (calculé côté SERVEUR uniquement)
+    # ------------------------------------------------------------------ #
+    def _config(self, msg):
+        """Ajoute la configuration du mode à un message diffusé."""
+        msg["auto"] = self.auto
+        msg["niveau"] = self.niveau
+        return msg
+
+    def _demarrer_auto(self):
+        if self._thread_auto is None:
+            self._thread_auto = threading.Thread(
+                target=self._boucle_auto, daemon=True,
+                name=f"auto-{id(self)}")
+            self._thread_auto.start()
+
+    def _boucle_auto(self):
+        """Joue les deux camps les uns après les autres et diffuse CHAQUE
+        état aux deux clients. Une seule simulation existe : côté serveur."""
+        while not self._arret_auto.is_set():
+            with self.cond:
+                if (self.game.move_count >= AUTO_MAX_COUPS
+                        and self.game.winner is None):
+                    # Garde-fou : on départage selon l'évaluation de la
+                    # position (voleur si elle lui est favorable).
+                    gagnant = VOLEUR if evaluer(self.game) > 0 else POLICE
+                    self.game.winner = gagnant
+                    log(f"Auto-Play — limite de coups atteinte, "
+                        f"vainqueur par évaluation : {gagnant}")
+                    self.broadcast({"type": "game_over", "winner": gagnant,
+                                    "state": self.game.to_dict()})
+                while (not self.auto or self.game.winner is not None
+                       or self.game.move_count >= AUTO_MAX_COUPS):
+                    if self._arret_auto.is_set():
+                        return
+                    self.cond.wait(timeout=0.25)
+                # On calcule sur un clones hors verrou : la bascule reste
+                # réactive même si Sarotra réfléchit longtemps.
+                snapshot, role = self.game.clone(), self.game.turn
+                niveau = self.niveau
+            try:
+                coup = choisir_coup(snapshot, role, niveau,
+                                    temps_max=TEMPS_IA_AUTO)
+            except Exception as e:          # ne jamais tuer le thread IA
+                log(f"erreur IA ({role}) : {e}")
+                coup = None
+
+            with self.cond:
+                # Bascule ou rematch pendant le calcul : on jette le coup.
+                if (not self.auto or self.game.winner is not None
+                        or self.game.turn != role
+                        or self.niveau != niveau
+                        or self.game.move_count != snapshot.move_count):
+                    self.cond.wait(timeout=0.05)
+                    continue
+
+                if coup is None:
+                    # Défense : le moteur n'aurait pas dû laisser ce cas.
+                    self.game.winner = POLICE if role == VOLEUR else VOLEUR
+                else:
+                    self.game.move(role, *coup)
+                state = self.game.to_dict()
+                if self.game.winner is not None:
+                    log(f"Auto-Play — partie terminée, vainqueur : "
+                        f"{self.game.winner}")
+                    self.broadcast({"type": "game_over",
+                                    "winner": self.game.winner,
+                                    "state": state})
+                else:
+                    self.broadcast({"type": "state", "state": state})
+                self.cond.wait(timeout=DELAI_AUTO)
+
+    def handle_auto(self, client, msg):
+        """Active/désactive l'auto-play et/ou change le niveau d'IA."""
+        with self.cond:
+            if msg.get("niveau") in NIVEAUX:
+                self.niveau = msg["niveau"]
+                for c in (self.voleur, self.police):
+                    if c is not None:
+                        c.niveau = self.niveau
+            if "enabled" in msg:
+                self.auto = bool(msg["enabled"])
+                for c in (self.voleur, self.police):
+                    if c is not None:
+                        c.auto = self.auto
+            log(f"Auto-Play {'activé' if self.auto else 'désactivé'} "
+                f"— niveau {self.niveau} (par {client.name})")
+            self.broadcast(self._config({
+                "type": "auto", "enabled": self.auto, "niveau": self.niveau,
+                "msg": texte("auto_active" if self.auto else "auto_desactive"),
+            }))
+            self.cond.notify_all()
 
     def start(self):
         """(Ré)initialise la partie et prévient les deux joueurs."""
         with self.lock:
             self.game = Game()
             self.rematch_votes = set()
-            log(f"Partie lancée : {self.voleur.name} (voleur) vs "
-                f"{self.police.name} (police)")
+            log(f"Partie lancée : "
+                f"{self.voleur.name if self.voleur else '?'} (voleur) vs "
+                f"{self.police.name if self.police else '?'} (police)")
             for c, role in ((self.voleur, VOLEUR), (self.police, POLICE)):
+                if c is None:
+                    continue
                 adversaire = self.police if role == VOLEUR else self.voleur
-                c.send({"type": "welcome", "role": role,
-                        "adversaire": adversaire.name})
-                c.send({"type": "start", "state": self.game.to_dict()})
+                c.send(self._config({"type": "welcome", "role": role,
+                                     "adversaire": adversaire.name
+                                     if adversaire else "?"}))
+                c.send(self._config({"type": "start",
+                                     "state": self.game.to_dict()}))
+            self._demarrer_auto()
+            self.cond.notify_all()
 
     def broadcast(self, obj):
+        """Diffuse un message aux deux clients (état identique des deux
+        côtés), avec la configuration du mode spectateur."""
+        msg = self._config(obj)
         for c in (self.voleur, self.police):
-            c.send(obj)
+            if c is not None:
+                c.send(msg)
 
     def handle_move(self, client, msg):
         with self.lock:
+            if self.auto:
+                client.send(self._config({
+                    "type": "error", "msg": texte("auto_refuse")}))
+                return
             if self.game.winner is not None:
                 client.send({"type": "error",
                              "msg": "La partie est terminée (rematch pour rejouer)."})
@@ -141,7 +283,9 @@ class Room:
                              "msg": "La partie n'est pas encore terminée."})
                 return
             self.rematch_votes.add(client.role)
-            if len(self.rematch_votes) >= 2:
+            # En mode spectateur, un seul des deux spectateurs suffit à
+            # relancer la partie (les deux peuvent cliquer sur « Rejouer »).
+            if self.auto or len(self.rematch_votes) >= 2:
                 self.start()
             else:
                 self.broadcast({"type": "info",
@@ -155,9 +299,13 @@ class Room:
                 self.police = None
             autre = self.voleur or self.police
             if autre is not None:
-                autre.send({"type": "info",
-                            "msg": "Votre adversaire s'est déconnecté. "
-                                   "Vous pouvez quitter (Échap) ou attendre."})
+                autre.send(self._config({
+                    "type": "info",
+                    "msg": "Votre adversaire s'est déconnecté. "
+                           "Vous pouvez quitter (Échap) ou attendre."}))
+            if self.voleur is None and self.police is None:
+                self._arret_auto.set()
+                self.cond.notify_all()
             log(f"{client.name} quitte son salon.")
 
 
@@ -245,7 +393,9 @@ class Serveur:
                     room = self._apparier(client)
                     if room is None:
                         client.send({"type": "waiting",
-                                     "msg": "En attente d'un adversaire..."})
+                                     "msg": "En attente d'un adversaire...",
+                                     "auto": client.auto,
+                                     "niveau": client.niveau})
                         log(f"{client.name} attend un adversaire")
                     else:
                         room.start()
@@ -253,6 +403,23 @@ class Serveur:
                 elif mtype == "move":
                     if client.room is not None:
                         client.room.handle_move(client, msg)
+
+                elif mtype in ("auto", "niveau"):
+                    # Config possible avant même l'appariement : elle sera
+                    # appliquée à la création de la Room.
+                    if msg.get("niveau") in NIVEAUX:
+                        client.niveau = msg["niveau"]
+                    if "enabled" in msg:
+                        client.auto = bool(msg["enabled"])
+                    if client.room is not None:
+                        client.room.handle_auto(client, msg)
+                    else:
+                        client.send({
+                            "type": "auto", "enabled": client.auto,
+                            "niveau": client.niveau,
+                            "msg": texte("auto_active" if client.auto
+                                         else "auto_desactive"),
+                        })
 
                 elif mtype == "rematch":
                     if client.room is not None:

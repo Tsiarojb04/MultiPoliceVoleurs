@@ -14,7 +14,11 @@ Lancement normal :  python main.py  (menu « Héberger » / « Rejoindre »).
 Lancement direct :  python client.py                (serveur détecté auto)
                     python client.py --host 192.168.1.20
 
-Touches : Échap = quitter, R = proposer de rejouer après une fin de partie.
+Touches : Échap = quitter, R = proposer de rejouer, A = basculer le mode
+« Auto-Play (IA vs IA) ». Dans ce mode, le serveur pilote les deux camps :
+les clics sur le plateau sont ignorés, mais les boutons du HUD restent
+accessibles pour désactiver le mode ou relancer une partie.
+
 La fenêtre est redimensionnable : le plateau reste centré et proportionnel.
 """
 
@@ -27,11 +31,12 @@ import threading
 
 import pygame
 
+from ai import NIVEAUX, NIVEAU_DEFAUT
 from discovery import chercher_serveurs
 from game import POLICE, VOLEUR, Game
-from locales import set_langue, texte
-from render import COL_BG, COL_COP, COL_TEXT, COL_TEXT_DIM, COL_THIEF, \
-    Layout, draw_scene, load_font
+from locales import texte
+from render import COL_BG, COL_COP, COL_SEL, COL_STATUS_BG, COL_TARGET, \
+    COL_TEXT, COL_TEXT_DIM, COL_THIEF, Layout, draw_scene, load_font
 
 WIDTH, HEIGHT = 880, 920
 MIN_W, MIN_H = 480, 540
@@ -103,6 +108,70 @@ class Reseau:
         self.connecte = False
 
 
+class BoutonHUD:
+    """Petit bouton cliquable du HUD (auto-play, difficulté, rejouer)."""
+
+    def __init__(self, identifiant, libelle, rect, couleur=COL_TEXT):
+        self.id = identifiant
+        self.libelle = libelle
+        self.rect = rect
+        self.couleur = couleur
+
+    def dessiner(self, screen):
+        pygame.draw.rect(screen, COL_STATUS_BG, self.rect, border_radius=8)
+        pygame.draw.rect(screen, self.couleur, self.rect, 2, border_radius=8)
+        img = load_font(13, bold=True).render(self.libelle, True, self.couleur)
+        screen.blit(img, img.get_rect(center=self.rect.center))
+
+
+def _libelle_auto(auto_play):
+    return texte("auto_bouton",
+                 etat=texte("auto_on") if auto_play else texte("auto_off"))
+
+
+def _libelle_niveau(niveau):
+    return texte("niveau_bouton", niveau=texte(f"niveau_{niveau}"))
+
+
+def _boutons_hud(w, h, auto_play, niveau, partie_finie):
+    """Boutons en haut à droite : ils restent cliquables même en spectateur."""
+    largeur = min(210, max(150, w // 3))
+    x = w - largeur - 12
+    boutons = [
+        BoutonHUD("auto", _libelle_auto(auto_play),
+                  pygame.Rect(x, 8, largeur, 30),
+                  COL_SEL if auto_play else COL_TEXT),
+        BoutonHUD("niveau", _libelle_niveau(niveau),
+                  pygame.Rect(x, 44, largeur, 30), COL_TARGET),
+    ]
+    if partie_finie:
+        boutons.append(BoutonHUD("rejouer", texte("btn_rejouer"),
+                                 pygame.Rect(x, 80, largeur, 30), COL_COP))
+    return boutons
+
+
+def _boutons_attente(w, h, auto_play, niveau):
+    """Mêmes réglages, mais dans la salle d'attente (avant la partie)."""
+    largeur = min(320, w - 40)
+    x = (w - largeur) // 2
+    y = h // 2 + 150
+    return [
+        BoutonHUD("auto", _libelle_auto(auto_play),
+                  pygame.Rect(x, y, largeur, 32),
+                  COL_SEL if auto_play else COL_TEXT),
+        BoutonHUD("niveau", _libelle_niveau(niveau),
+                  pygame.Rect(x, y + 40, largeur, 32), COL_TARGET),
+    ]
+
+
+def _clic_bouton(boutons, pos):
+    """Renvoie l'identifiant du bouton cliqué, ou None."""
+    for bouton in boutons:
+        if bouton.rect.collidepoint(pos):
+            return bouton.id
+    return None
+
+
 def _ecran_connexion(screen, host, port):
     """Affiche un message pendant la (courte) tentative de connexion."""
     w, h = screen.get_size()
@@ -126,7 +195,6 @@ def lancer_client(host=None, port=None, nom=None, role="any", screen=None,
 
     Renvoie False si la connexion a échoué, True si la session s'est
     déroulée (même terminée)."""
-    set_langue("fr")
     port = PORT_PAR_DEFAUT if port is None else port
     if not host or host == "auto":
         serveurs = chercher_serveurs()
@@ -164,6 +232,8 @@ def lancer_client(host=None, port=None, nom=None, role="any", screen=None,
     adversaire = "?"
     selected, targets = None, []
     info = texte("net_attente")
+    auto_play = False          # mode spectateur IA, imposé par le serveur
+    niveau_ia = NIVEAU_DEFAUT
 
     running = True
     while running:
@@ -176,7 +246,16 @@ def lancer_client(host=None, port=None, nom=None, role="any", screen=None,
             pass
         for msg in messages:
             mtype = msg.get("type")
-            if mtype == "waiting":
+            # Le serveur est la source de vérité : tout message de partie
+            # resynchronise le mode et la difficulté sur ce client.
+            if "auto" in msg:
+                auto_play = bool(msg["auto"])
+            if msg.get("niveau") in NIVEAUX:
+                niveau_ia = msg["niveau"]
+            if mtype == "auto":
+                info = msg.get("msg", "")
+                selected, targets = None, []
+            elif mtype == "waiting":
                 info = msg.get("msg", texte("net_attente"))
             elif mtype == "welcome":
                 mon_role = msg.get("role")
@@ -213,9 +292,36 @@ def lancer_client(host=None, port=None, nom=None, role="any", screen=None,
                     if game is not None and game.winner is not None:
                         reseau.envoyer({"type": "rematch"})
                         info = texte("net_rematch")
+                elif event.key == pygame.K_a:
+                    reseau.envoyer({"type": "auto", "enabled": not auto_play})
+                    info = texte("auto_demande")
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if game is None or game.winner is not None or mon_role != game.turn:
-                    if game is not None and mon_role != game.turn and game.winner is None:
+                # Les boutons du HUD restent toujours accessibles, y compris
+                # en mode spectateur ou après la fin de la partie.
+                w_b, h_b = screen.get_size()
+                boutons = (_boutons_attente(w_b, h_b, auto_play, niveau_ia)
+                           if game is None else
+                           _boutons_hud(w_b, h_b, auto_play, niveau_ia,
+                                        game.winner is not None))
+                ident = _clic_bouton(boutons, event.pos)
+                if ident == "auto":
+                    reseau.envoyer({"type": "auto", "enabled": not auto_play})
+                    info = texte("auto_demande")
+                    continue
+                if ident == "niveau":
+                    suivant = NIVEAUX[(NIVEAUX.index(niveau_ia) + 1) % len(NIVEAUX)]
+                    reseau.envoyer({"type": "niveau", "niveau": suivant})
+                    info = texte("auto_niveau", niveau=texte(f"niveau_{suivant}"))
+                    continue
+                if ident == "rejouer":
+                    reseau.envoyer({"type": "rematch"})
+                    info = texte("net_rematch")
+                    continue
+                # Plateau désactivé en mode Auto-Play : l'IA joue des deux côtés.
+                if (game is None or auto_play or game.winner is not None
+                        or mon_role != game.turn):
+                    if (game is not None and not auto_play
+                            and game.winner is None and mon_role != game.turn):
                         info = texte("net_pas_tour")
                     continue
                 node = layout.pick_node(event.pos)
@@ -257,14 +363,31 @@ def lancer_client(host=None, port=None, nom=None, role="any", screen=None,
             if info:
                 img = font_petit.render(info, True, COL_TEXT_DIM)
                 screen.blit(img, img.get_rect(center=(w_fen // 2, h_fen // 2 + 120)))
+            for bouton in _boutons_attente(w_fen, h_fen, auto_play, niveau_ia):
+                bouton.dessiner(screen)
         else:
             draw_scene(screen, layout, game, selected, targets, info)
             couleur = COL_THIEF if mon_role == VOLEUR else COL_COP
             libelle = (texte("net_vous_voleur") if mon_role == VOLEUR
                        else texte("net_vous_police"))
-            screen.blit(font_titre.render(
-                f"{libelle}  —  {texte('net_adversaire_court')} : {adversaire}",
-                True, couleur), (12, 8))
+            entete = f"{libelle}  —  {texte('net_adversaire_court')} : {adversaire}"
+            img_entete = font_titre.render(entete, True, couleur)
+            largeur_boutons = min(210, max(150, w_fen // 3)) + 30
+            if img_entete.get_width() > w_fen - largeur_boutons:
+                entete = f"{libelle}  —  {adversaire}"
+                img_entete = font_titre.render(entete, True, couleur)
+            if img_entete.get_width() > w_fen - largeur_boutons:
+                img_entete = font_titre.render(
+                    "VOLEUR" if mon_role == VOLEUR else "POLICE", True, couleur)
+            screen.blit(img_entete, (12, 8))
+            if auto_play:
+                badge = load_font(15, bold=True).render(
+                    texte("auto_bandeau"), True, COL_SEL)
+                screen.blit(badge, badge.get_rect(center=(
+                    w_fen // 2, h_fen - layout.status_h - 16)))
+            for bouton in _boutons_hud(w_fen, h_fen, auto_play, niveau_ia,
+                                       game.winner is not None):
+                bouton.dessiner(screen)
 
         pygame.display.flip()
         clock.tick(FPS)

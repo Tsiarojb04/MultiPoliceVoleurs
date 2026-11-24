@@ -89,6 +89,11 @@ class Game:
         g.history = []
         return g
 
+    def clone(self):
+        """Copie indépendante de l'état (utilisée par l'IA pour simuler des
+        coups sans modifier la partie réelle)."""
+        return Game.from_dict(self.to_dict())
+
     # ------------------------------------------------------------------ #
     # Aides
     # ------------------------------------------------------------------ #
